@@ -1,0 +1,251 @@
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/uart.h"
+#include "esp_log.h"
+
+#define BUF_SIZE 1024
+#define RX_BUF_SIZE 128
+#define UART_NUM UART_NUM_0
+
+static const char *TAG = "TELEMETRIA";
+
+// Estructura para almacenar las estadísticas
+typedef struct {
+    int ultimo;
+    int mayor;
+    int menor;
+    int suma_total;
+    int cantidad;
+    bool primer_valor;
+} Estadisticas;
+
+// Buffer para recepción
+static char rx_buffer[RX_BUF_SIZE];
+static int rx_index = 0;
+
+// Inicializar estadísticas
+void init_estadisticas(Estadisticas *est) {
+    est->ultimo = 0;
+    est->mayor = 0;
+    est->menor = 0;
+    est->suma_total = 0;
+    est->cantidad = 0;
+    est->primer_valor = true;
+}
+
+// Extraer el valor de la trama {'caudal': VALOR}
+int extraer_valor(const char *trama, int *valor) {
+    // Formato esperado: {'caudal': VALOR}
+    // Longitud mínima: {'caudal': X} (al menos 15 caracteres)
+    
+    // Verificar prefijo "{'caudal': "
+    if (strncmp(trama, "{'caudal': ", 11) != 0) {
+        return 0; // No coincide el formato
+    }
+    
+    // Verificar sufijo "}"
+    int len = strlen(trama);
+    if (len < 13 || trama[len - 1] != '}') {
+        return 0; // No termina con }
+    }
+    
+    // Extraer la parte del número
+    const char *num_start = trama + 11; // Después de "{'caudal': "
+    char num_str[4] = {0}; // Máximo 2 dígitos + null
+    int i = 0;
+    
+    // Copiar dígitos
+    while (i < 3 && num_start[i] != '\0' && num_start[i] != '}') {
+        if (!isdigit((unsigned char)num_start[i])) {
+            return 0; // Carácter no dígito encontrado
+        }
+        num_str[i] = num_start[i];
+        i++;
+    }
+    
+    // Verificar que hay al menos un dígito
+    if (i == 0) {
+        return 0; // No hay número
+    }
+    
+    // Verificar que después del número viene '}'
+    if (num_start[i] != '}') {
+        return 0; // Formato incorrecto
+    }
+    
+    // Convertir a entero
+    *valor = atoi(num_str);
+    
+    // Verificar rango 0-99
+    if (*valor < 0 || *valor > 99) {
+        return 0; // Fuera de rango
+    }
+    
+    return 1; // Éxito
+}
+
+// Actualizar estadísticas con nuevo valor
+void actualizar_estadisticas(Estadisticas *est, int valor) {
+    est->ultimo = valor;
+    est->suma_total += valor;
+    est->cantidad++;
+    
+    if (est->primer_valor) {
+        est->mayor = valor;
+        est->menor = valor;
+        est->primer_valor = false;
+    } else {
+        if (valor > est->mayor) {
+            est->mayor = valor;
+        }
+        if (valor < est->menor) {
+            est->menor = valor;
+        }
+    }
+}
+
+// Calcular promedio con 2 decimales
+float calcular_promedio(Estadisticas *est) {
+    if (est->cantidad == 0) {
+        return 0.0;
+    }
+    return (float)est->suma_total / est->cantidad;
+}
+
+// Imprimir respuesta en formato requerido
+void imprimir_respuesta(Estadisticas *est) {
+    float promedio = calcular_promedio(est);
+    
+    // Formato: {'último': ULTIMO, 'mayor': MAYOR, 'menor': MENOR, 'promedio': PROMEDIO}
+    printf("{'último': %d, 'mayor': %d, 'menor': %d, 'promedio': %.2f}\n", 
+           est->ultimo, est->mayor, est->menor, promedio);
+    fflush(stdout);
+}
+
+// Procesar una trama completa
+void procesar_trama(const char *trama, Estadisticas *est) {
+    ESP_LOGD(TAG, "Procesando trama: '%s'", trama);
+    
+    int valor;
+    
+    // Intentar extraer el valor
+    if (!extraer_valor(trama, &valor)) {
+        ESP_LOGW(TAG, "Trama inválida ignorada: '%s'", trama);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Valor válido recibido: %d", valor);
+    
+    // Actualizar estadísticas
+    actualizar_estadisticas(est, valor);
+    
+    // Imprimir respuesta
+    imprimir_respuesta(est);
+}
+
+// Inicializar UART
+void uart_init(void) {
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+    
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(UART_NUM, 1, 3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM, BUF_SIZE * 2, 0, 0, NULL, 0));
+    
+    ESP_LOGI(TAG, "UART inicializado correctamente");
+}
+
+// Mostrar mensaje de inicio
+void mostrar_bienvenida(void) {
+    printf("\n\n");
+    printf("========================================\n");
+    printf("  SISTEMA DE TELEMETRÍA - CAUDALÍMETRO\n");
+    printf("========================================\n");
+    printf("Formato esperado: {'caudal': VALOR}\n");
+    printf("Rango válido: 0-99\n");
+    printf("========================================\n\n");
+    printf("Esperando datos...\n\n");
+    fflush(stdout);
+}
+
+// Limpiar buffer de recepción
+void limpiar_buffer(void) {
+    memset(rx_buffer, 0, sizeof(rx_buffer));
+    rx_index = 0;
+}
+
+void app_main(void) {
+    // Inicializar logging
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+    
+    // Inicializar UART
+    uart_init();
+    
+    // Inicializar estadísticas
+    Estadisticas estadisticas;
+    init_estadisticas(&estadisticas);
+    
+    // Mostrar bienvenida
+    mostrar_bienvenida();
+    
+    // Limpiar buffer
+    limpiar_buffer();
+    
+    // Buffer temporal para lectura
+    uint8_t *data = (uint8_t *)malloc(BUF_SIZE);
+    if (data == NULL) {
+        ESP_LOGE(TAG, "Error al asignar memoria");
+        return;
+    }
+    
+    while (1) {
+        // Leer datos del UART
+        int length = uart_read_bytes(UART_NUM, data, BUF_SIZE - 1, 20 / portTICK_PERIOD_MS);
+        
+        if (length > 0) {
+            data[length] = '\0';
+            
+            // Procesar cada carácter
+            for (int i = 0; i < length; i++) {
+                char c = (char)data[i];
+                
+                // Si es fin de línea, procesar la trama
+                if (c == '\n' || c == '\r') {
+                    if (rx_index > 0) {
+                        rx_buffer[rx_index] = '\0';
+                        
+                        // Procesar la trama completa
+                        procesar_trama(rx_buffer, &estadisticas);
+                        
+                        // Limpiar buffer
+                        limpiar_buffer();
+                    }
+                }
+                // Si hay espacio y es carácter imprimible, guardar
+                else if (rx_index < RX_BUF_SIZE - 1 && isprint((unsigned char)c)) {
+                    rx_buffer[rx_index++] = c;
+                }
+                // Si el buffer se llena, reiniciar
+                else if (rx_index >= RX_BUF_SIZE - 1) {
+                    ESP_LOGW(TAG, "Buffer lleno, reiniciando...");
+                    limpiar_buffer();
+                }
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    free(data);
+}
