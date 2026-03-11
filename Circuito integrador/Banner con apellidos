@@ -1,0 +1,150 @@
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+
+// PINES - Display 2 en GPIO0 (corregido)
+#define SEG_A   4
+#define SEG_B   5
+#define SEG_C   6
+#define SEG_D   7
+#define SEG_E   10
+#define SEG_F   20
+#define SEG_G   21
+
+#define DIGIT_0 1   // Display 1
+#define DIGIT_1 0   // Display 2 - AHORA EN GPIO0
+#define DIGIT_2 3   // Display 3
+#define DIGIT_3 8   // Display 4
+
+const int segment_pins[] = {SEG_A, SEG_B, SEG_C, SEG_D, SEG_E, SEG_F, SEG_G};
+const int digit_pins[] = {DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3};
+
+// Tabla Siekoo (con tus modificaciones)
+const uint8_t siekoo_font[26][7] = {
+    {1,1,1,1,1,0,1}, // A
+    {0,0,1,1,1,1,1}, // B
+    {0,0,0,1,1,0,1}, // C
+    {0,1,1,1,1,0,1}, // D
+    {1,0,0,1,1,1,1}, // E
+    {1,0,0,0,1,1,1}, // F
+    {1,0,1,1,1,1,0}, // G
+    {0,0,1,0,1,1,1}, // H
+    {1,0,0,0,1,0,0}, // I
+    {1,0,1,1,0,0,0}, // J
+    {1,0,1,0,1,1,1}, // K
+    {0,0,0,1,1,1,0}, // L
+    {1,0,1,0,1,0,1}, // M - ROMERO
+    {0,0,1,0,1,0,1}, // N - REDONDO
+    {0,0,1,1,1,0,1}, // O - ROMERO Y REDONDO
+    {1,1,0,0,1,1,1}, // P
+    {1,1,1,0,0,1,1}, // Q
+    {0,0,0,0,1,0,1}, // R - ROMERO Y REDONDO
+    {1,0,1,1,0,1,0}, // S - SANCHEZ
+    {0,0,0,1,1,1,1}, // T
+    {0,0,1,1,1,0,0}, // U
+    {0,1,0,1,0,1,0}, // V
+    {0,1,0,1,0,1,1}, // W
+    {0,0,1,0,1,0,0}, // X
+    {0,1,1,1,0,1,1}, // Y
+    {1,1,0,1,1,0,0}  // Z
+};
+
+const char* mensaje = "ROMERO REDONDO SANCHEZ";
+const int msg_len = 23;
+int pos = -4;  // POSICIÓN INICIAL: Entera, fuera de la pantalla por la derecha
+int sub_pos = 0;  // Subposición para movimiento suave (0-3)
+
+void setup_pins() {
+    for (int i = 0; i < 7; i++) {
+        gpio_reset_pin(segment_pins[i]);
+        gpio_set_direction(segment_pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(segment_pins[i], 0);
+    }
+    
+    for (int i = 0; i < 4; i++) {
+        gpio_reset_pin(digit_pins[i]);
+        gpio_set_direction(digit_pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(digit_pins[i], 1);  // 1 = apagado
+    }
+}
+
+void apagar_todos() {
+    for (int i = 0; i < 7; i++) gpio_set_level(segment_pins[i], 0);
+    for (int d = 0; d < 4; d++) gpio_set_level(digit_pins[d], 1);
+}
+
+void mostrar_caracter(char c, int digito) {
+    apagar_todos();
+    
+    if (c >= 'A' && c <= 'Z') {
+        int idx = c - 'A';
+        for (int i = 0; i < 7; i++) {
+            gpio_set_level(segment_pins[i], siekoo_font[idx][i]);
+        }
+    }
+    
+    gpio_set_level(digit_pins[digito], 0);  // 0 = encendido
+}
+
+void app_main(void) {
+    setup_pins();
+    apagar_todos();
+    
+    printf("====================================\n");
+    printf("Sistema iniciado - Display 2 en GPIO0\n");
+    printf("Mostrando: %s\n", mensaje);
+    printf("Banner CONTINUO desde la derecha (SIN REPETICIONES)\n");
+    printf("====================================\n");
+    
+    uint32_t ultimo_desplazamiento = 0;
+    const uint32_t intervalo_desplazamiento = 150;  // ms entre desplazamientos
+    
+    while (1) {
+        // Multiplexado rápido
+        for (int d = 0; d < 4; d++) {
+            // Calcular qué carácter mostrar en cada display
+            // Usamos pos y sub_pos para un desplazamiento suave pero sin repeticiones
+            int offset = d * 4 + sub_pos;  // Escala para movimiento suave
+            
+            // Determinar qué carácter mostrar basado en la posición
+            int idx_mensaje;
+            if (sub_pos == 0) {
+                // Movimiento de carácter completo - mostrar carácter en pos + d
+                idx_mensaje = pos + d;
+            } else {
+                // Durante el movimiento entre caracteres, mostrar el mismo que en sub_pos=0
+                // pero con un pequeño ajuste para que parezca que se mueve suavemente
+                idx_mensaje = pos + d;
+            }
+            
+            if (idx_mensaje >= 0 && idx_mensaje < msg_len) {
+                mostrar_caracter(mensaje[idx_mensaje], d);
+            } else {
+                apagar_todos();  // Espacio fuera del mensaje
+            }
+            
+            vTaskDelay(pdMS_TO_TICKS(2));  // 2ms por display
+        }
+        
+        // Control de desplazamiento SUAVE y SIN REPETICIONES
+        uint32_t ahora = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        if (ahora - ultimo_desplazamiento > intervalo_desplazamiento) {
+            sub_pos++;
+            if (sub_pos >= 4) {
+                sub_pos = 0;
+                pos++;  // Avanzar una posición completa solo cuando sub_pos completa ciclo
+            }
+            
+            // Cuando todo el mensaje ha pasado, reiniciar desde la derecha
+            if (pos >= msg_len) {
+                pos = -4;  // Reinicia desde fuera de la pantalla por la derecha
+                sub_pos = 0;
+                printf("Ciclo completado - Reiniciando desde la derecha\n");
+            }
+            
+            ultimo_desplazamiento = ahora;
+        }
+    }
+}
